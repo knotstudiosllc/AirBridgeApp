@@ -27,3 +27,7 @@ Settings are stored in `%APPDATA%\AirBridge\settings.json`; the password is encr
 ```bash
 dotnet publish -c Release -o publish
 ```
+
+AirBridge.csproj references `..\RtkIhv\RtkIhv.csproj`, so RtkIhv must be checked out next to this folder.
+
+`.github/workflows/build.yml` does the same on GitHub Actions: it checks out this repo and RtkIhv side by side, publishes the self-contained single-file `AirBridge.exe`, uploads it as a build artifact, and attaches it to a GitHub Release when a `v*` tag is pushed (the tag sets the version). RtkIhv is expected at `<owner>/RtkIhv`; set the `RTKIHV_REPO` repository variable to use another name, and the `RTKIHV_TOKEN` secret (a token with read access) if that repo is private.

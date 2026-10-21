@@ -1,0 +1,72 @@
+name: Build
+
+on:
+  push:
+    branches: [master, main]
+    tags: ['v*']
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    runs-on: windows-latest
+    steps:
+      # AirBridge.csproj references ..\RtkIhv\RtkIhv.csproj, so both repos are
+      # checked out side by side, the same way they sit on disk locally.
+      - name: Check out AirBridgeApp
+        uses: actions/checkout@v4
+        with:
+          path: AirBridgeApp
+
+      # RtkIhv lives in its own repo. Set the RTKIHV_REPO variable if it is not
+      # <owner>/RtkIhv, and the RTKIHV_TOKEN secret if that repo is private.
+      - name: Check out RtkIhv
+        uses: actions/checkout@v4
+        with:
+          repository: ${{ vars.RTKIHV_REPO || format('{0}/RtkIhv', github.repository_owner) }}
+          token: ${{ secrets.RTKIHV_TOKEN || github.token }}
+          path: RtkIhv
+
+      - uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: 10.0.x
+
+      - name: Pick version
+        id: ver
+        shell: pwsh
+        run: |
+          if ($env:GITHUB_REF_TYPE -eq 'tag') { $v = $env:GITHUB_REF_NAME.TrimStart('v') } else { $v = '1.0.0' }
+          "version=$v" >> $env:GITHUB_OUTPUT
+
+      - name: Restore
+        run: dotnet restore AirBridgeApp/AirBridge.csproj
+
+      - name: Build
+        run: dotnet build AirBridgeApp/AirBridge.csproj -c Release --no-restore -p:Version=${{ steps.ver.outputs.version }}
+
+      # Self-contained single-file win-x64 settings come from AirBridge.csproj.
+      - name: Publish
+        run: dotnet publish AirBridgeApp/AirBridge.csproj -c Release --no-restore -o out -p:Version=${{ steps.ver.outputs.version }}
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: AirBridge-${{ steps.ver.outputs.version }}
+          path: out/AirBridge.exe
+          if-no-files-found: error
+
+      - name: Attach to GitHub Release
+        if: github.ref_type == 'tag'
+        working-directory: AirBridgeApp
+        env:
+          GH_TOKEN: ${{ github.token }}
+        shell: pwsh
+        run: |
+          gh release view $env:GITHUB_REF_NAME 2>$null
+          if ($LASTEXITCODE -eq 0) {
+            gh release upload $env:GITHUB_REF_NAME ../out/AirBridge.exe --clobber
+          } else {
+            gh release create $env:GITHUB_REF_NAME ../out/AirBridge.exe --title "Air Bridge $env:GITHUB_REF_NAME" --generate-notes
+          }
