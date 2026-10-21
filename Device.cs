@@ -117,7 +117,7 @@ static class Shell
         return (p.HasExited ? p.ExitCode : -1, o.Trim());
     }
 
-    /// <summary>WLAN AutoConfig on the dongle's station interface; RealtekWiFi.dll returns 0x7 while it's off.</summary>
+    /// <summary>WLAN AutoConfig on the dongle's station interface; the Realtek IHV path returns 0x7 while it's off.</summary>
     public static bool? AutoConfigEnabled(string iface)
     {
         var (_, o) = Run("netsh", "wlan show settings");

@@ -1,11 +1,12 @@
 using System.Net.NetworkInformation;
+using RtkIhv;
 
 namespace AirBridge;
 
 enum EngineState { NoDongle, Idle, Starting, Running, Stopping, Error }
 
 /// <summary>
-/// Owns the dongle lifecycle: Meta's start-up sequence, the access point, plug/unplug
+/// Owns the dongle lifecycle: the Realtek start-up sequence (RtkIhv, no Meta DLL), the access point, plug/unplug
 /// handling and auto-start. All public methods are safe to call from the UI thread.
 /// </summary>
 sealed class Engine : IDisposable
@@ -13,7 +14,7 @@ sealed class Engine : IDisposable
     readonly SemaphoreSlim _op = new(1, 1);
     readonly Hotspot _hotspot = new();
     readonly System.Threading.Timer _watch;
-    RealtekSdk? _sdk;
+    RtkWifi? _rtk;
     bool _switchingUsb;
     string? _stationName;
 
@@ -112,21 +113,35 @@ sealed class Engine : IDisposable
         catch { return null; }
     }
 
-    RealtekSdk EnsureSdk()
+    RtkWifi EnsureRtk()
     {
-        if (_sdk != null) return _sdk;
-        var dir = MetaInstall.RuntimeDir ?? throw new InvalidOperationException(
-            "Meta Horizon Link isn't installed. Air Bridge uses its RealtekWiFi.dll to drive the dongle.");
-        _sdk = new RealtekSdk(Path.Combine(dir, "RealtekWiFi.dll"));
-        _sdk.Log += Log;
-        return _sdk;
+        if (_rtk != null) return _rtk;
+        _rtk = new RtkWifi(LoadConfig());
+        _rtk.Log += Log;
+        _rtk.CalibrationStep += (ch, level, outcome) => Log($"Calibration channel {ch} level {level}: {outcome}");
+        return _rtk;
     }
 
-    /// <summary>Runs an SDK call; on 0x7 (AutoConfig off on the dongle) retries with it briefly on.</summary>
+    /// <summary>Meta's tuning JSON when Meta Horizon Link is installed, otherwise the same values built in.</summary>
+    RtkConfig LoadConfig()
+    {
+        try
+        {
+            if (MetaInstall.RuntimeDir is { } dir && MetaInstall.ExtractSdkConfig(dir) is { } json)
+            {
+                Log("Using the Realtek tuning from your Meta Horizon Link install.");
+                return RtkConfig.FromMetaJson(json);
+            }
+        }
+        catch (Exception e) { Log($"Couldn't read Meta's Realtek tuning ({e.Message}); using built-in values."); }
+        return new RtkConfig();
+    }
+
+    /// <summary>Runs a Realtek call; on 0x7 (AutoConfig off on the dongle) retries with it briefly on.</summary>
     uint Sdk(Func<uint> call)
     {
         uint rc = call();
-        if (rc == RealtekSdk.IHV_UNAVAILABLE && _stationName != null && Shell.AutoConfigEnabled(_stationName) == false)
+        if (rc == RtkStatus.IHV_UNAVAILABLE && _stationName != null && Shell.AutoConfigEnabled(_stationName) == false)
         {
             Log("WLAN AutoConfig is off on the Air Bridge; enabling it.");
             Shell.SetAutoConfig(_stationName, true);
@@ -137,8 +152,8 @@ sealed class Engine : IDisposable
 
     static void Expect(uint rc, string step)
     {
-        if (rc != RealtekSdk.OK)
-            throw new InvalidOperationException($"{step} failed (0x{rc:x} {RealtekSdk.StatusNames.GetValueOrDefault(rc, "")})");
+        if (rc != RtkStatus.OK)
+            throw new InvalidOperationException($"{step} failed (0x{rc:x} {RtkStatus.Name(rc)})");
     }
 
     public async Task StartAsync()
@@ -152,45 +167,24 @@ sealed class Engine : IDisposable
             if (Shell.MetaServiceRunning())
                 Log("Warning: Meta's OVRService is running and may take the dongle back. Quit Meta Horizon Link.");
 
-            if (MetaInstall.RuntimeDir == null)
-            {
-                // Basic mode: the Realtek driver (installed by Windows) can host the AP on its own;
-                // only Meta's tuning, channel pinning and the USB 3 switch are skipped.
-                Log("Meta Horizon Link not installed: basic mode (no Realtek tuning or USB 3 switch).");
-                _stationName = Device.StationInterface()?.Name;
-                Set(EngineState.Starting, "Starting the network…");
-                await StartApCoreAsync();
-                Set(EngineState.Running, _hotspot.Mode + " · basic mode");
-                Notify?.Invoke($"\"{Settings.Ssid}\" is up on the Air Bridge (basic mode).", false);
-                return;
-            }
-
-            Set(EngineState.Starting, "Loading Meta's Realtek SDK…");
-            var sdk = EnsureSdk();
-            var json = MetaInstall.ExtractSdkConfig(MetaInstall.RuntimeDir!)
-                       ?? throw new InvalidOperationException("Couldn't find Meta's Realtek config in OculusAppFramework.dll.");
+            Set(EngineState.Starting, "Opening the Air Bridge…");
+            var rtk = EnsureRtk();
             _stationName = Device.StationInterface()?.Name;
 
-            await Task.Run(() =>
-            {
-                Expect(sdk.PreConfig(json), "SDK pre-config");
-                Expect(Sdk(sdk.Initialize), "Initialize");
-                sdk.RegisterCallback(); // 0x1 = already registered from an earlier run, which is fine
-            });
+            await Task.Run(() => Expect(Sdk(rtk.Initialize), "Initialize"));
 
             Set(EngineState.Starting, "Switching to USB 3…");
             _switchingUsb = true;
             try
             {
-                var (rc, result) = await sdk.UsbSwitchAsync(TimeSpan.FromSeconds(45));
-                if (rc == RealtekSdk.PENDING && result == null) throw new InvalidOperationException("USB switch timed out.");
-                if (result == 2)
+                uint result = await rtk.UsbSwitchAsync();
+                if (result == RtkWifi.USB_SWITCH_DONE)
                 {
                     Log("Dongle re-enumerated on USB 3; waiting for it to settle.");
                     for (int i = 0; i < 30 && Device.FindInstance() == null; i++) await Task.Delay(500);
                     await Task.Delay(5000);
                 }
-                else if (result is not (null or 1))
+                else if (result != RtkWifi.USB_SWITCH_NOT_NEEDED)
                 {
                     Log($"USB switch reported {result}; continuing on the current link.");
                 }
@@ -201,17 +195,17 @@ sealed class Engine : IDisposable
             _stationName = Device.StationInterface()?.Name;
 
             Set(EngineState.Starting, "Configuring the radio…");
-            await Task.Run(() => Expect(Sdk(sdk.ConfigSoftAp), "ConfigSoftAp"));
+            await Task.Run(() => Expect(Sdk(rtk.ConfigSoftAp), "ConfigSoftAp"));
 
             Set(EngineState.Starting, "Starting the network…");
             await StartApCoreAsync();
 
             await Task.Run(() =>
             {
-                uint rc = Sdk(() => sdk.FbMode(true));
-                if (rc != RealtekSdk.OK) { Thread.Sleep(2000); rc = Sdk(() => sdk.FbMode(true)); }
-                if (rc != RealtekSdk.OK) Log("Meta's FB mode couldn't be enabled; the network still works without it.");
-                Channel = sdk.GetChannel();
+                uint rc = Sdk(() => rtk.FbFeatureConfig(true));
+                if (rc != RtkStatus.OK) { Thread.Sleep(2000); rc = Sdk(() => rtk.FbFeatureConfig(true)); }
+                if (rc != RtkStatus.OK) Log("Low-latency (FB) mode couldn't be enabled; the network still works without it.");
+                Channel = rtk.GetCurrentChannel() is { } ch ? (ch.BandLabel, ch.Channel, ch.WidthMhz) : null;
             });
 
             Set(EngineState.Running, _hotspot.Mode);
@@ -249,13 +243,13 @@ sealed class Engine : IDisposable
             if (State is not (EngineState.Running or EngineState.Starting or EngineState.Error)) return;
             Set(EngineState.Stopping, "Stopping…");
             await _hotspot.StopAsync();
-            if (_sdk != null && !unplugged)
+            if (_rtk != null)
             {
+                var rtk = _rtk;
                 await Task.Run(() =>
                 {
-                    _sdk.FbMode(false);
-                    _sdk.Unregister();
-                    _sdk.Deinitialize();
+                    if (!unplugged) rtk.FbFeatureConfig(false);
+                    rtk.Deinitialize();
                 });
             }
             Channel = null;
@@ -276,6 +270,6 @@ sealed class Engine : IDisposable
         _watch.Dispose();
         // off the UI thread, so StopAsync's continuations can't deadlock against this Wait
         Task.Run(() => StopAsync()).Wait(TimeSpan.FromSeconds(10));
-        _sdk?.Dispose();
+        _rtk?.Dispose();
     }
 }

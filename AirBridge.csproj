@@ -20,4 +20,8 @@
     <EnableCompressionInSingleFile>true</EnableCompressionInSingleFile>
   </PropertyGroup>
 
+  <ItemGroup>
+    <ProjectReference Include="..\RtkIhv\RtkIhv.csproj" />
+  </ItemGroup>
+
 </Project>

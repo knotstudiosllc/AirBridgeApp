@@ -5,7 +5,7 @@ A small tray app that runs the D-Link DWA-F18 "VR Air Bridge" as a Wi-Fi access 
 ## Requirements
 - Windows 10 2004 or newer, or Windows 11.
 - The DWA-F18 plugged into a **USB 3** port, ideally a rear motherboard port with no hub in between.
-- **Meta Horizon Link installed but not running.** Air Bridge loads Meta's `RealtekWiFi.dll` and its tuning config from your own install; nothing from Meta ships with this app. Quit the Meta app before using Air Bridge, because the two fight over the dongle.
+- **No Meta software needed.** Air Bridge talks to the Realtek driver directly (the RtkIhv library in `..\RtkIhv`), sending the same commands Meta's `RealtekWiFi.dll` does. If Meta Horizon Link is installed, its Realtek tuning values are read from your install; otherwise the same values are built in. If Meta's app is installed, quit it before using Air Bridge, because the two fight over the dongle.
 
 ## Use
 1. Run `AirBridge.exe` and accept the admin prompt. The Realtek driver control path needs admin.
