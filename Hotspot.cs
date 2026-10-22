@@ -51,6 +51,14 @@ sealed class Hotspot
     {
         if (mgr.TetheringOperationalState == TetheringOperationalState.On)
             await mgr.StopTetheringAsync();
+        // Windows' "power saving" turns the hotspot off after 5 minutes with no client, which tears
+        // down the tuned AP before the headset ever joins. Off while we run; RestoreIdleTimeout puts it back.
+        if (NetworkOperatorTetheringManager.IsNoConnectionsTimeoutEnabled())
+        {
+            await NetworkOperatorTetheringManager.DisableNoConnectionsTimeoutAsync();
+            _restoreIdleTimeout = true;
+            Log?.Invoke("Turned off Mobile Hotspot's 5-minute idle shutdown while Air Bridge runs.");
+        }
         var cfg = mgr.GetCurrentAccessPointConfiguration();
         cfg.Ssid = ssid;
         cfg.Passphrase = passphrase;
@@ -93,6 +101,15 @@ sealed class Hotspot
             Log?.Invoke("Wi-Fi Direct AP stopped.");
         }
         Mode = "";
+    }
+
+    bool _restoreIdleTimeout;
+
+    public async Task RestoreIdleTimeout()
+    {
+        if (!_restoreIdleTimeout) return;
+        _restoreIdleTimeout = false;
+        try { await NetworkOperatorTetheringManager.EnableNoConnectionsTimeoutAsync(); } catch { }
     }
 
     public record Client(string Mac, string? Ip, string? Name);

@@ -199,14 +199,7 @@ sealed class Engine : IDisposable
 
             Set(EngineState.Starting, "Starting the network…");
             await StartApCoreAsync();
-
-            await Task.Run(() =>
-            {
-                uint rc = Sdk(() => rtk.FbFeatureConfig(true));
-                if (rc != RtkStatus.OK) { Thread.Sleep(2000); rc = Sdk(() => rtk.FbFeatureConfig(true)); }
-                if (rc != RtkStatus.OK) Log("Low-latency (FB) mode couldn't be enabled; the network still works without it.");
-                Channel = rtk.GetCurrentChannel() is { } ch ? (ch.BandLabel, ch.Channel, ch.WidthMhz) : null;
-            });
+            await Task.Run(() => EnableFb(rtk));
 
             Set(EngineState.Running, _hotspot.Mode);
             Notify?.Invoke($"\"{Settings.Ssid}\" is up on the Air Bridge.", false);
@@ -227,10 +220,31 @@ sealed class Engine : IDisposable
         await _hotspot.StartAsync(Settings.Ssid, Settings.Password, Guid.Parse(station.Id));
     }
 
+    void EnableFb(RtkWifi rtk)
+    {
+        uint rc = Sdk(() => rtk.FbFeatureConfig(true));
+        if (rc != RtkStatus.OK) { Thread.Sleep(2000); rc = Sdk(() => rtk.FbFeatureConfig(true)); }
+        if (rc != RtkStatus.OK) Log("Low-latency (FB) mode couldn't be enabled; the network still works without it.");
+        Channel = rtk.GetCurrentChannel() is { } ch ? (ch.BandLabel, ch.Channel, ch.WidthMhz) : null;
+    }
+
+    /// <summary>
+    /// A new hotspot is a new BSS, so the radio tuning goes with the old one: redo ConfigSoftAp
+    /// before it and FB mode after it, as on a fresh start.
+    /// </summary>
     async Task RestartApAsync()
     {
         if (!await _op.WaitAsync(0)) return;
-        try { await StartApCoreAsync(); }
+        try
+        {
+            if (_rtk is { } rtk)
+            {
+                await Task.Run(() => { if (rtk.FbEnabled) rtk.FbFeatureConfig(false); Sdk(rtk.ConfigSoftAp); });
+                await StartApCoreAsync();
+                await Task.Run(() => EnableFb(rtk));
+            }
+            else await StartApCoreAsync();
+        }
         catch (Exception e) { Log($"AP restart failed: {e.Message}"); Set(EngineState.Error, e.Message); }
         finally { _op.Release(); }
     }
@@ -243,6 +257,7 @@ sealed class Engine : IDisposable
             if (State is not (EngineState.Running or EngineState.Starting or EngineState.Error)) return;
             Set(EngineState.Stopping, "Stopping…");
             await _hotspot.StopAsync();
+            await _hotspot.RestoreIdleTimeout();
             if (_rtk != null)
             {
                 var rtk = _rtk;
