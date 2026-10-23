@@ -2,7 +2,7 @@ name: Build
 
 on:
   push:
-    branches: [master, main]
+    branches: ['**']
     tags: ['v*']
   pull_request:
   workflow_dispatch:
@@ -23,10 +23,26 @@ jobs:
 
       # RtkIhv lives in its own repo. Set the RTKIHV_REPO variable if it is not
       # <owner>/RtkIhv, and the RTKIHV_TOKEN secret if that repo is private.
+      # A branch that exists in both repos builds against RtkIhv's copy of it, so
+      # a change split across the two repos builds before either is merged.
+      - name: Pick RtkIhv branch
+        id: rtkihv
+        shell: pwsh
+        env:
+          REPO: ${{ vars.RTKIHV_REPO || format('{0}/RtkIhv', github.repository_owner) }}
+          TOKEN: ${{ secrets.RTKIHV_TOKEN || github.token }}
+          BRANCH: ${{ github.head_ref || github.ref_name }}
+        run: |
+          $ref = ''
+          if ($env:GITHUB_REF_TYPE -ne 'tag' -and (git ls-remote --heads "https://x-access-token:$env:TOKEN@github.com/$env:REPO" "refs/heads/$env:BRANCH")) { $ref = $env:BRANCH }
+          Write-Host "RtkIhv ref: $(if ($ref) { $ref } else { '(default branch)' })"
+          "ref=$ref" >> $env:GITHUB_OUTPUT
+
       - name: Check out RtkIhv
         uses: actions/checkout@v4
         with:
           repository: ${{ vars.RTKIHV_REPO || format('{0}/RtkIhv', github.repository_owner) }}
+          ref: ${{ steps.rtkihv.outputs.ref }}
           token: ${{ secrets.RTKIHV_TOKEN || github.token }}
           path: RtkIhv
 

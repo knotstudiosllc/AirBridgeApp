@@ -196,10 +196,9 @@ sealed class Engine : IDisposable
 
             Set(EngineState.Starting, "Configuring the radio…");
             if (Device.StationInterface() is { } st) await _hotspot.StopLeftoverAsync(Guid.Parse(st.Id));
-            // FB mode survives the app (a kill, a crash, or a stop in the wrong order). After that the
-            // radio sends no beacons at all, even for a plain hotspot, so headsets can't see the network.
-            // Clearing FB and soft-AP mode isn't enough: it takes a device restart followed by one
-            // untuned hotspot start/stop.
+            // FB mode survives the app (a kill, a crash, or a stop in the wrong order). Initialize turns
+            // it off the way Meta's DLL does; this is the fallback when the driver refused: a device
+            // restart followed by one untuned hotspot start/stop.
             if (rtk.FbEnabled)
             {
                 Log("Low-latency mode was left on from a previous run; resetting the Air Bridge first.");
@@ -265,8 +264,8 @@ sealed class Engine : IDisposable
 
     /// <summary>
     /// The AP went down underneath us with FB still on, which leaves the radio unable to beacon.
-    /// Close the driver session without touching FB and run a full start: it sees FB left on and
-    /// does the device-restart recovery before tuning a fresh AP.
+    /// Close the driver session without touching FB and run a full start: Initialize sees FB left
+    /// on and clears it before a fresh AP is tuned.
     /// </summary>
     async Task RestartApAsync()
     {
