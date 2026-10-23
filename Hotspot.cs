@@ -47,6 +47,27 @@ sealed class Hotspot
         Mode = "Wi-Fi Direct (no internet)";
     }
 
+    /// <summary>
+    /// Stops a Mobile Hotspot on the Air Bridge that outlived a previous run (Windows keeps it up when
+    /// the app dies). Configuring the radio under a running one leaves the next hotspot without beacons.
+    /// </summary>
+    public async Task StopLeftoverAsync(Guid stationAdapterId)
+    {
+        try
+        {
+            var inet = NetworkInformation.GetInternetConnectionProfile();
+            var adapter = NetworkInformation.GetConnectionProfiles()
+                .Select(p => p.NetworkAdapter)
+                .FirstOrDefault(a => a != null && a.NetworkAdapterId == stationAdapterId);
+            if (inet == null || adapter == null) return;
+            var mgr = NetworkOperatorTetheringManager.CreateFromConnectionProfile(inet, adapter);
+            if (mgr.TetheringOperationalState == TetheringOperationalState.Off) return;
+            await mgr.StopTetheringAsync();
+            Log?.Invoke("Stopped a Mobile Hotspot left running by a previous run.");
+        }
+        catch (Exception e) { Log?.Invoke($"Couldn't check for a leftover hotspot: {e.Message}"); }
+    }
+
     async Task StartTetheringAsync(NetworkOperatorTetheringManager mgr, string ssid, string passphrase)
     {
         if (mgr.TetheringOperationalState == TetheringOperationalState.On)

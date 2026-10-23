@@ -195,6 +195,25 @@ sealed class Engine : IDisposable
             _stationName = Device.StationInterface()?.Name;
 
             Set(EngineState.Starting, "Configuring the radio…");
+            if (Device.StationInterface() is { } st) await _hotspot.StopLeftoverAsync(Guid.Parse(st.Id));
+            // FB mode survives the app (a kill, a crash, or a stop in the wrong order). After that the
+            // radio sends no beacons at all, even for a plain hotspot, so headsets can't see the network.
+            // Clearing FB and soft-AP mode isn't enough: it takes a device restart followed by one
+            // untuned hotspot start/stop.
+            if (rtk.FbEnabled)
+            {
+                Log("Low-latency mode was left on from a previous run; resetting the Air Bridge first.");
+                await Task.Run(() =>
+                {
+                    rtk.FbFeatureConfig(false);
+                    rtk.Deinitialize(); // soft-AP mode off too
+                });
+                await RestartDongleAsync();
+                await StartApCoreAsync();
+                await Task.Delay(5000);
+                await _hotspot.StopAsync();
+                await Task.Run(() => Expect(Sdk(rtk.Initialize), "Initialize"));
+            }
             await Task.Run(() => Expect(Sdk(rtk.ConfigSoftAp), "ConfigSoftAp"));
 
             Set(EngineState.Starting, "Starting the network…");
@@ -214,6 +233,22 @@ sealed class Engine : IDisposable
         finally { _op.Release(); }
     }
 
+    async Task RestartDongleAsync()
+    {
+        if (DongleInstance == null) return;
+        _switchingUsb = true; // the dongle disappears on purpose
+        try
+        {
+            var (code, output) = await Task.Run(() => Shell.Run("pnputil", $"/restart-device \"{DongleInstance}\""));
+            if (code != 0) Log($"Device restart failed ({code}): {output.Trim()}");
+            await Task.Delay(2000);
+            for (int i = 0; i < 30 && Device.StationInterface() == null; i++) await Task.Delay(500);
+            await Task.Delay(5000);
+        }
+        finally { _switchingUsb = false; }
+        DongleInstance = Device.FindInstance();
+    }
+
     async Task StartApCoreAsync()
     {
         var station = Device.StationInterface() ?? throw new InvalidOperationException("Air Bridge network adapter not found.");
@@ -229,24 +264,22 @@ sealed class Engine : IDisposable
     }
 
     /// <summary>
-    /// A new hotspot is a new BSS, so the radio tuning goes with the old one: redo ConfigSoftAp
-    /// before it and FB mode after it, as on a fresh start.
+    /// The AP went down underneath us with FB still on, which leaves the radio unable to beacon.
+    /// Close the driver session without touching FB and run a full start: it sees FB left on and
+    /// does the device-restart recovery before tuning a fresh AP.
     /// </summary>
     async Task RestartApAsync()
     {
         if (!await _op.WaitAsync(0)) return;
         try
         {
-            if (_rtk is { } rtk)
-            {
-                await Task.Run(() => { if (rtk.FbEnabled) rtk.FbFeatureConfig(false); Sdk(rtk.ConfigSoftAp); });
-                await StartApCoreAsync();
-                await Task.Run(() => EnableFb(rtk));
-            }
-            else await StartApCoreAsync();
+            await _hotspot.StopAsync();
+            if (_rtk is { } rtk) await Task.Run(() => rtk.Deinitialize());
+            Set(EngineState.Idle);
         }
-        catch (Exception e) { Log($"AP restart failed: {e.Message}"); Set(EngineState.Error, e.Message); }
+        catch (Exception e) { Log($"AP restart failed: {e.Message}"); Set(EngineState.Error, e.Message); return; }
         finally { _op.Release(); }
+        await StartAsync();
     }
 
     public async Task StopAsync(bool unplugged = false)
@@ -256,16 +289,19 @@ sealed class Engine : IDisposable
         {
             if (State is not (EngineState.Running or EngineState.Starting or EngineState.Error)) return;
             Set(EngineState.Stopping, "Stopping…");
+            // FB off while the AP is still up, as the test harness does: with the AP already gone the
+            // driver is busy and FB-off leaves the radio unable to beacon on the next start.
+            if (_rtk != null && !unplugged)
+            {
+                var rtk = _rtk;
+                await Task.Run(() => rtk.FbFeatureConfig(false));
+            }
             await _hotspot.StopAsync();
             await _hotspot.RestoreIdleTimeout();
             if (_rtk != null)
             {
                 var rtk = _rtk;
-                await Task.Run(() =>
-                {
-                    if (!unplugged) rtk.FbFeatureConfig(false);
-                    rtk.Deinitialize();
-                });
+                await Task.Run(() => rtk.Deinitialize());
             }
             Channel = null;
             Clients = Array.Empty<Hotspot.Client>();
